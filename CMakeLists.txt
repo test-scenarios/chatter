@@ -9,17 +9,21 @@ HunterGate(
 
 project(Chatter)
 
+#[[
+get_filename_component(build_leaf "${CMAKE_CURRENT_BINARY_DIR}" NAME)
+message(STATUS "build_leaf=${build_leaf} from ${CMAKE_CURRENT_BINARY_DIR}")
+execute_process(COMMAND ${CMAKE_COMMAND} "-H${CMAKE_CURRENT_LIST_DIR}/dependencies" "-B${CMAKE_CURRENT_BINARY_DIR}/dependencies" "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
+]]
+
 hunter_add_package(Boost COMPONENTS system)
-hunter_add_package(OpenSSL)
 
 find_package(Boost CONFIG COMPONENTS system)
-find_package(OpenSSL)
 find_package(Threads)
 
 file(GLOB_RECURSE src_files CONFIGURE_DEPENDS "src/*.cpp" "src/*.hpp")
 add_executable(chatter ${src_files})
 target_include_directories(chatter PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(chatter PRIVATE Boost::system OpenSSL::Crypto OpenSSL::SSL Threads::Threads)
+target_link_libraries(chatter PRIVATE Boost::system Threads::Threads)
 target_compile_definitions(chatter PRIVATE BOOST_ASIO_DISABLE_CONCEPTS)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")

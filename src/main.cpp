@@ -1,9 +1,26 @@
 #include "config.hpp"
 #include "explain.hpp"
+#include <boost/io/ios_state.hpp>
 #include <chrono>
+#include <iomanip>
 #include <iostream>
 
 namespace program {
+
+std::mutex io_mutex;
+
+template <class... Stuff> void emit(Stuff &&... stuff) {
+  auto l = std::unique_lock(io_mutex);
+  auto id = std::this_thread::get_id();
+
+  auto oldflags = std::cout.flags();
+  std::cout << "[" << std::hex << std::setw(16) << std::setfill('0') << id
+            << "] : ";
+  std::cout.flags(oldflags);
+
+  ((std::cout << stuff), ...);
+  std::cout << std::endl;
+}
 
 struct chatter {
   //
@@ -19,17 +36,20 @@ struct chatter {
   /// will be invoked on an inner private strand
   chatter(executor_type exec);
 
-  template <class CompletionToken>
+  template <BOOST_ASIO_COMPLETION_TOKEN_FOR(void(error_code)) CompletionToken
+                BOOST_ASIO_DEFAULT_COMPLETION_TOKEN_TYPE(executor_type)>
   auto async_say_after(std::string message, duration after,
-                       CompletionToken &&token)
+                       CompletionToken &&token
+                           BOOST_ASIO_DEFAULT_COMPLETION_TOKEN(executor_type))
       -> BOOST_ASIO_INITFN_RESULT_TYPE(CompletionToken, void(error_code));
 
   struct report {};
 
+  /*
   template <class CompletionToken>
   auto async_report(report &target, CompletionToken &&token)
       -> BOOST_ASIO_INITFN_RESULT_TYPE(CompletionToken, void(error_code));
-
+*/
   auto get_executor() -> executor_type;
 
   //
@@ -50,30 +70,39 @@ struct chatter {
       struct state {
 
         template <class Exec>
-        state(Handler h, Exec e) : handler_(std::move(h)), timer_(e) {}
+        state(Handler h, Exec e, std::string message,
+              std::chrono::system_clock::time_point when,
+              std::tuple<Guards...> guards)
+            : handler_(std::move(h)), timer_(e), message_(std::move(message)),
+              when_(when), guards_(std::move(guards)) {}
 
         Handler handler_;
         net::system_timer timer_;
+        std::string message_;
+        std::chrono::system_clock::time_point when_;
+        std::tuple<Guards...> guards_;
       };
 
       template <class HandlerArg>
       job_op(impl *self, std::string message,
              std::chrono::system_clock::time_point when, HandlerArg &&handler,
              Guards const &... guards)
-          : impl_(self),
-            state_(std::make_unique<state>(std::forward<HandlerArg>(handler),
-                                           get_executor())),
-            message_(std::move(message)), when_(when), guards_(guards...) {}
+          : impl_(self), state_(std::make_unique<state>(
+                             std::forward<HandlerArg>(handler), get_executor(),
+                             std::move(message), when,
+                             std::make_tuple(std::move(guards)...))) {}
 
-      void operator()(boost::system::error_code const& ec = {}, std::size_t = 0) {
+      void operator()(boost::system::error_code const &ec = {},
+                      std::size_t = 0) {
         auto &s = *state_;
+        boost::ignore_unused(s);
         BOOST_ASIO_CORO_REENTER(this) {
-          s.timer_.expires_at(when_);
+          s.timer_.expires_at(s.when_);
           BOOST_ASIO_CORO_YIELD
-          s.timer_.async_wait(std::move(this));
+          s.timer_.async_wait(std::move(*this));
           if (!ec) {
-//            impl_->current_report_; // update the report
-            std::cout << message_ << std::endl;
+            //            impl_->current_report_; // update the report
+            emit(s.message_);
           }
           // now we need to complete but we need to do it on the correct
           // executor
@@ -93,9 +122,6 @@ struct chatter {
 
       impl *impl_;
       std::unique_ptr<state> state_;
-      std::string message_;
-      std::chrono::system_clock::time_point when_;
-      std::tuple<Guards...> guards_;
     };
 
   public:
@@ -124,7 +150,7 @@ struct chatter {
 
 chatter::chatter(executor_type exec) : impl_(std::make_unique<impl>(exec)) {}
 
-template <class CompletionToken>
+template <BOOST_ASIO_COMPLETION_TOKEN_FOR(void(error_code)) CompletionToken>
 auto chatter::async_say_after(std::string message, duration after,
                               CompletionToken &&token)
     -> BOOST_ASIO_INITFN_RESULT_TYPE(CompletionToken, void(error_code)) {
@@ -151,15 +177,51 @@ int run() {
   net::io_context ioc;
 
   auto chat = chatter(ioc.get_executor());
-  chat.async_say_after("Hello, ", 1s, [](error_code) {});
-  chat.async_say_after("World!", 2s, [](error_code) {});
-  chatter::report rep;
-  chat.async_report(rep, [](error_code) {});
+
+  //
+  // launch a thread to ensure completion handler on correct thread while
+  // internal op on different thread
+  //
+  auto t1 = std::thread([&] {
+    auto loc = net::io_context();
+    chat.async_say_after(
+        "Hello, ", 1s,
+        net::bind_executor(loc.get_executor(),
+            [](error_code ec) { emit("Hello done with ", ec.message()); }));
+    loc.run();
+  });
+
+  //
+  // launch a thread to ensure completion handler on correct thread while
+  // internal op on different thread
+  //
+  auto t2 = std::thread([&] {
+    auto loc = net::io_context();
+    chat.async_say_after(
+        "World!", 2s, net::bind_executor(loc.get_executor(), [](error_code ec) {
+          emit("World done with ", ec.message());
+        }));
+    loc.run();
+  });
+
+  //
+  // handler and internal op on same thread
+  //
+  chat.async_say_after(
+      "World!", 3s, net::bind_executor(ioc.get_executor(), [](error_code ec) {
+        emit("That's all folks! ", ec.message());
+      }));
+
+  //  chatter::report rep;
+  //  chat.async_report(rep, [](error_code) {});
 
   ioc.run();
   ioc.reset();
-  chat.async_report(rep, [](error_code) {});
+  //  chat.async_report(rep, [](error_code) {});
   ioc.run();
+
+  if (t1.joinable()) t1.join();
+  if (t2.joinable()) t2.join();
 
   return 0;
 }

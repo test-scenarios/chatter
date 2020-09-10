@@ -1,14 +1,12 @@
-# beast-softphone-problem
+# chatter
 
 ## Intention
 
-To recreate the problem reported here:
-
-https://github.com/boostorg/beast/issues/1798
+Demonstrate a simple io object that allows concurrent access and internal sequencing with a timer
 
 ## Required toolchain
 
-This program requires a c++11 or better toolchain.
+This program requires a c++17 or better toolchain.
 
 Some very good toolchains files available here:
 
